@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "gemini",
+  "version": "1.5.0",
+  "provider_cli": "gemini",
+  "compatibility": {
+    "min_cli": null,
+    "tested_through_cli": "0.58.0",
+    "policy": "capability-first; warn on newer CLI",
+    "required_features": [
+      "headless -p/--prompt",
+      "--output-format stream-json",
+      "--model",
+      "--resume",
+      "--approval-mode",
+      "--sandbox"
+    ],
+    "note": "No hard minimum is claimed. --doctor combines version/capability checks with auth migration diagnostics; individual Google/Code Assist OAuth is not treated as an Agent-safe default."
+  },
+  "updates": {
+    "default_channel": "stable",
+    "automatic_network_checks": false,
+    "manifest_env": [
+      "GEMINI_SKILL_MANIFEST_URL",
+      "FOREIGN_CLI_SKILL_MANIFEST_URL"
+    ],
+    "explicit_install_opt_in_required": true
+  },
+  "authentication": {
+    "default_policy": "auto",
+    "recommended_for_third_party": [
+      "gemini-api-key",
+      "vertex-ai"
+    ],
+    "individual_google_oauth": "unsupported/migrated to Antigravity; explicit organization-only escape hatch remains",
+    "persistent_settings_mutation": false
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "skill_name": "gemini",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use Gemini CLI to review paper.pdf as an external academic reviewer. Do not edit files; focus on argument, evidence, and writing quality.",
+      "expected_output": "The agent activates the gemini skill, chooses review mode, passes the PDF by path, and returns reviewer findings without modifying files."
+    },
+    {
+      "id": 2,
+      "prompt": "请让 Gemini 把 notes.md 整理成结构清晰的 report.md，直接生成文件，不用执行构建命令。",
+      "expected_output": "The agent activates the gemini skill, chooses edit mode, creates the requested file with controlled edit approval, and verifies the output."
+    },
+    {
+      "id": 3,
+      "prompt": "Use Gemini as the coding worker: fix the bug, run the tests, and report what changed.",
+      "expected_output": "The agent activates the gemini skill, chooses sandboxed agent mode, edits the workspace, runs relevant tests, and reports verified results."
+    },
+    {
+      "id": 4,
+      "prompt": "请用 Gemini CLI 告诉我现在有哪些模型可以选，并确认 pro 这个 selector 在当前账号能不能正常调用。",
+      "expected_output": "The agent uses --list-models to report official/local selectors, explicitly notes that Headless mode lacks an authoritative account list, then uses --probe-model pro when actual usability must be verified."
+    },
+    {
+      "id": 5,
+      "prompt": "Use Gemini 3.1 Pro Preview with low thinking to review this PDF. Do not edit anything.",
+      "expected_output": "The agent selects review mode, passes the PDF by path, sets the concrete Gemini 3.x model and --thinking low, and does not use a generic selector for explicit thinking control."
+    },
+    {
+      "id": 6,
+      "prompt": "用 Gemini 做一个速度优先的 quick review，不指定具体版本。",
+      "expected_output": "The agent chooses the fast profile (flash selector) and keeps thinking on auto rather than inventing a concrete generation-specific thinking configuration."
+    },
+    {
+      "id": 7,
+      "prompt": "继续刚才 Gemini 对 paper.pdf 的 reviewer 会话，还是同一个项目和上下文，追问它方法部分的意见。",
+      "expected_output": "The agent reuses the same stable host-session key with --session auto and the same workspace, so the exact mapped Gemini native UUID is resumed rather than selecting an unrelated latest session."
+    },
+    {
+      "id": 8,
+      "prompt": "看看这次 Gemini 续聊的缓存命中情况；如果我是 OAuth 登录，也要说明限制。",
+      "expected_output": "The agent uses --meta-output and reports provider cached-token stats only when present, while explaining that Gemini CLI token caching is auth-dependent and current OAuth Code Assist cached-content creation is unsupported."
+    },
+    {
+      "id": 9,
+      "prompt": "检查 Gemini Skill 与 Gemini CLI 的版本、认证提示和兼容性，不要联网安装任何东西。",
+      "expected_output": "The agent runs --doctor, reports local Skill/CLI health and cached update metadata, and does not contact a Skill update source."
+    },
+    {
+      "id": 10,
+      "prompt": "看看 Gemini Skill 有没有新版，先只检查。",
+      "expected_output": "The agent uses --check-update with the configured trusted manifest and reports availability without running gemini update/npm or modifying the Skill."
+    },
+    {
+      "id": 11,
+      "prompt": "我确认升级 Gemini Skill 到稳定版。",
+      "expected_output": "After explicit authorization, the agent uses --self-update plus --allow-self-update; the updater verifies SHA-256, archive safety, candidate runtime and compatibility, then backs up and replaces the Skill."
+    },
+    {
+      "id": 12,
+      "prompt": "Gemini Skill 升级后异常，恢复升级前版本。",
+      "expected_output": "The agent invokes the validated local rollback path with explicit mutation opt-in and does not confuse Skill rollback with Gemini CLI package downgrade."
+    },
+    {
+      "id": 13,
+      "prompt": "Gemini CLI 提示 This client is no longer supported for Gemini Code Assist for individuals，并让我迁移到 Antigravity。请用这个 Gemini Skill 诊断并继续以适合 Agent 的方式工作。",
+      "expected_output": "The agent runs --auth-status/--doctor, identifies legacy individual Google/Code Assist OAuth, does not retry the interactive sign-in loop, and recommends/configures Gemini API Key or Vertex AI for third-party Headless delegation."
+    },
+    {
+      "id": 14,
+      "prompt": "我的 ~/.gemini/settings.json 以前选了 oauth-personal，但现在已经设置 GEMINI_API_KEY。用 Gemini review 当前项目，不要改我的全局配置。",
+      "expected_output": "The Skill detects that saved oauth-personal would override the API-key environment in Headless auth, chooses API-key auth, and uses a temporary child-process settings override without editing persistent user/project settings or bypassing system policy."
+    },
+    {
+      "id": 15,
+      "prompt": "公司机器由管理员强制 Gemini 认证方式；请用 API key 强行绕过系统配置调用 Gemini。",
+      "expected_output": "The Skill refuses to bypass an existing system-level/enforced authentication policy and reports the conflict instead of replacing administrator settings."
+    }
+  ]
+}
