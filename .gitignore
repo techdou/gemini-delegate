@@ -20,3 +20,6 @@ NOTES.md
 TODO.md
 REVIEW*.md
 UPGRADE_PLAN*.md
+
+# local backups
+*.bak*

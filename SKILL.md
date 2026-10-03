@@ -11,7 +11,50 @@ when its quota is healthy and you need session affinity, cache stats, or auth ma
 The parent agent owns routing, authorization, verification, and the final user-facing answer.
 
 
-## Primary: invoke agy directly
+## Primary: the agy wrapper (scripts/agy.py)
+
+For any programmatic delegation, prefer the wrapper — it closes the
+workspace-identification gap measured on 2026-09-16 (see notes below):
+
+> **Proxy constraint (mainland network, mandatory — account-safety, not just
+> functionality):** agy and gemini-cli both reach Google services and FAIL
+> without a proxy. Repeatedly hitting Google from a real mainland IP also
+> risks account-level security review (豆哥 confirmed this constraint
+> 2026-10-01) — never run either CLI bare on this machine. Always prefix
+> delegation commands with `HTTPS_PROXY=http://127.0.0.1:7890
+> HTTP_PROXY=http://127.0.0.1:7890` (local relay port; check it is up first).
+> Measured 2026-09-28: without the proxy, agy hangs on "Waiting for
+> authentication ... timed out" — this looks like an expired OAuth token but is
+> NOT; try the proxy before re-authenticating. gemini-cli without the proxy
+> reports `fetch failed`; with it, auth works.
+>
+> **Hard guard (2026-10-01):** `scripts/agy.py` now refuses to launch agy when
+> no proxy env var is set or the proxy port is unreachable (TCP probe, exit 2)
+> — the no-bare-connection rule is enforced in code, not just by convention.
+> `--allow-no-proxy` is the explicit escape hatch for genuinely offshore hosts.
+> The gemini-cli wrapper (`scripts/run.py`) has NO such guard: bare invocations
+> of `run.py`/`gemini` still rely on the caller prefixing the proxy vars.
+
+```bash
+python3 <skill-dir>/scripts/agy.py \
+  --cwd <workspace> \
+  --task-file <task.md>          # or --task "<bounded text>"
+  --timeout 25m                  # default; heavy reviews need it
+  --output <result.md>           # optional, append stdout for cross-session records
+```
+
+The wrapper resolves `--cwd` to an absolute path, runs agy there, and
+injects a workspace-anchor header into every task (bilingual, explicit
+"do not search for another project path") — the agent never has to
+guess where it works. It also adds a hard-kill timeout buffer and
+surfaces agy's partial-output warning.
+
+Wrapper flags: `--model`, `--effort low|medium|high`, `--plan-mode`
+(read-only planning), `--add-dir <path>` (repeatable extra dirs),
+`--continue-session` (`-c`), `--no-anchor` (only when the task truly
+needs no directory).
+
+## Bare agy invocation (fallback, and the measured pitfalls)
 
 ```bash
 cd <workspace> && agy --dangerously-skip-permissions --print-timeout 15m --print="<bounded task text>"
@@ -34,6 +77,65 @@ Verified invocation notes (measured 2026-09-07):
   for programmatic delegation.
 - Treat a non-zero exit or an empty result as failure; do not fabricate an answer. Retry
   once only for a concrete safe fix (e.g. re-attaching the prompt correctly).
+
+Additional pitfalls (measured 2026-09-16, the reason the wrapper exists):
+
+- **"Eligibility check failed ... not available in your location" ≠ proxy
+  problem (measured 2026-10-01).** If the error persists WITH a healthy proxy,
+  reproduce with `--log-file <path>`: log lines `Print mode: silent auth
+  succeeded` followed by `server_oauth.go ... Account ineligible` mean the
+  proxy chain and OAuth both worked — Google's backend
+  (`daily-cloudcode-pa.googleapis.com ... loadCodeAssist`) rejected the
+  account/exit-IP combo server-side. Measured: a Singapore datacenter exit
+  (172.236.x) is rejected even though Singapore IS on the official supported
+  list (antigravity.google/docs/faq); a US exit worked in late September.
+  Triage order: switch to a US/Japan node and retry → if still failing, check
+  the Google account's country setting and account type (official FAQ:
+  Workspace accounts can hit eligibility issues; a personal @gmail.com is
+  recommended).
+
+- **Proxy first, auth second (2026-09-28):** on the mainland network both agy
+  and gemini-cli must run behind `HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:7890`;
+  the wrapper inherits these env vars, so prefix the wrapper invocation too.
+  gemini-cli additionally needs a current CLI version: v0.58.0's default model
+  `gemini-2.5-flash` was retired for new users (404 suggests migrating); upgrade
+  via `npm i -g @google/gemini-cli@latest`.
+- **`cd <workspace>` does not make the agent treat the cwd as the target
+  repository.** On a heavy review task the agent spent most of a 15m
+  budget "locating the VoiceHub repository containing vendor-sayit.mjs"
+  (checking other drives, shell history, process args) and timed out with
+  zero findings. The fix is not a flag — agy has no `--cwd` — it is an
+  explicit workspace path in the task text itself. The wrapper automates
+  this; when invoking bare, put the absolute path on the first line of
+  the task and say "do not search for or create other project paths".
+  (Wrapper-verified: with the anchor, small tasks return in seconds and
+  heavy tasks go straight to work — confirmed in the agy task logs.)
+- **Heavy multi-step reviews are agy's weak spot even with a correct
+  anchor.** The same six-facet review that Codex's review mode finished
+  in ~15m was still mid-flight at 25m with agy (agent-loop overhead on
+  serial explore → run tests → report). Budget 40m+ for agy reviews that
+  execute test suites, or route heavy cross-reviews to the Codex skill
+  and keep agy for small/medium bounded tasks.
+- 15m is not enough for review tasks that also run test suites; use 25m+.
+- Long inline `--print` payloads are fragile across shells; prefer a task
+  file (`--task-file` in the wrapper, or "first read <abs-path>/task.md"
+  in a bare invocation).
+
+## Text-inline review mode (measured 2026-09-17)
+
+Heavy multi-step reviews are agy's weak spot even with a correct anchor — the agent loop can spend the entire timeout locating context and return zero findings. When the review target can be fully enumerated as text (source strings, short documents, config files), prefer the **text-inline fast path** over a longer timeout:
+
+1. Extract the review target yourself and inline it into the task file verbatim.
+2. State explicitly in the task: "do not use any tools, do not read files, do not run commands — everything to review is inlined below."
+3. Keep the review dimensions and output format in the task file so the run is a single-pass text analysis.
+
+Measured on the same workload the agent-loop path timed out at 25m with no output, while the inline path returned a full itemized review in minutes. Reserve the agent-loop path for reviews that genuinely need tool use (running tests, reading binaries, viewing images) and budget 25m+ for those.
+
+**Never silently preprocess inlined text.** Deduplication, language filtering, or any "harmless cleanup" before inlining creates structural gaps (repeated table cells collapse to one, pure-ASCII rows vanish). The model will faithfully report those gaps as real defects — fabricated-looking findings that are actually artifacts of your extractor. Rules:
+
+- Inline review targets verbatim; if preprocessing is unavoidable, declare it in the task and require the model to distinguish "missing from the provided text" from "missing from the source".
+- Budget context size: inline mode is for targets that fit comfortably in working context (order of a few thousand lines). Oversized targets go into sequential review batches, not one dump.
+- When a review returns a batch of "missing cell / missing entry / dangling reference" findings, verify them against the source before fixing anything.
 
 ## Why agy first: gemini-cli quota reality (measured 2026-09-07)
 

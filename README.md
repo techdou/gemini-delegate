@@ -29,6 +29,19 @@ python3 scripts/run.py --doctor
 
 Gemini 免费层会收集交互数据用于改进。敏感内容（学术未发表工作等）请勿走免费层通道，细节见 `references/security.md`。
 
+## 场景参考
+
+| 认证、登录态与超时排错 | [authentication.md](references/authentication.md) |
+| 模型选择与 thinking 档位 | [model-control.md](references/model-control.md) |
+| 会话延续与缓存复用 | [session-cache.md](references/session-cache.md) |
+| 沙箱与授权边界 | [security.md](references/security.md) |
+| 健康检查、更新与回滚 | [maintenance.md](references/maintenance.md) |
+| 与官方 Gemini CLI 的对应关系 | [official-cli.md](references/official-cli.md) |
+| 典型委派工作流 | [workflows.md](references/workflows.md) |
+
+非官方技能：由 TechDou 维护，与 Google 官方无关联。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+
 ## 目录
 
 ```
