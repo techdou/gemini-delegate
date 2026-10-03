@@ -1,5 +1,5 @@
 ---
-name: gemini
+name: gemini-delegate
 description: Delegate bounded work to the locally installed Google Gemini CLI, including model selection/probing, thinking control, session continuity, cache-aware repeated PDF/multimodal review/writing, workspace-scoped coding, auth-aware Headless execution, and explicit Skill health/update/rollback maintenance. Use only when the user or parent agent explicitly asks for Gemini/Gemini CLI/Antigravity CLI (agy), asks about Gemini models/thinking, or asks to continue/resume a prior Gemini delegation. Do not activate for generic writing, review, analysis, or coding that does not request Gemini.
 ---
 

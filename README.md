@@ -1,4 +1,4 @@
-# gemini (delegation skill)
+# gemini-delegate (delegation skill)
 
 一个 agent 技能（skill）：把有边界的任务委派给本地安装的 Google Gemini CLI——模型探测与选择、thinking 控制、会话延续、缓存感知的重复 PDF/多模态评审与写作。与 [codex](https://github.com/techdou/codex) 同构，主通道为 Antigravity CLI（agy），Gemini CLI 作为 fallback。
 
@@ -12,7 +12,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/techdou/gemini.git ~/.agents/skills/gemini
+git clone https://github.com/techdou/gemini-delegate.git ~/.agents/skills/gemini-delegate
 ```
 
 前置：本机已安装 Gemini CLI（或 Antigravity CLI）并完成认证。

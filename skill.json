@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "name": "gemini",
-  "version": "1.5.0",
+  "name": "gemini-delegate",
+  "version": "1.5.1",
   "provider_cli": "gemini",
   "compatibility": {
     "min_cli": null,
