@@ -19,11 +19,16 @@ git clone https://github.com/techdou/gemini-delegate.git ~/.agents/skills/gemini
 
 ## 用法
 
-由 agent 按 `SKILL.md` 自动调度；手动体检：
+由 agent 按 `SKILL.md` 自动调度。主/备用通道都强制代理，默认本地 HTTP mixed port `127.0.0.1:7890`；代理不可达或出口预检失败就停止。直接调用原生 `agy` 不受此保护。手动使用：
 
 ```bash
-python3 scripts/run.py --doctor
+python scripts/agy.py --doctor
+python scripts/agy.py --interactive --cwd .
+# Gemini 备用通道自检（也经过代理）
+python scripts/run.py --doctor
 ```
+
+网络配置及资格拒绝排查见 [proxy-safety.md](references/proxy-safety.md)。地区资格错误本身不能确认或排除封号。
 
 ## 隐私注意
 

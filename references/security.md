@@ -20,3 +20,13 @@ Read this file before changing approval modes, path handling, sandboxing, or esc
 ## Failure policy
 
 If writes are denied, check folder trust and policy configuration first. Do not silently switch to broader unsandboxed permissions. Retry once only when the failure has a concrete, low-risk fix.
+
+## Mandatory proxy boundary
+
+Both wrappers use `proxy_guard.py`; normalize child proxy variables, clear NO_PROXY,
+and fail closed on TCP/CONNECT/TLS/trace failure. There is no direct escape hatch.
+Remote updater requests use explicit CONNECT and validate HTTPS redirects.
+This controls wrapper network configuration, not a system firewall or the proxy's
+DIRECT/routing rules. Read [proxy-safety.md](proxy-safety.md) for verification limits.
+agy no longer adds `--dangerously-skip-permissions` by default; opting in requires
+explicit task authorization and must not be used to work around a denied action.

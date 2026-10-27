@@ -11,115 +11,120 @@ when its quota is healthy and you need session affinity, cache stats, or auth ma
 The parent agent owns routing, authorization, verification, and the final user-facing answer.
 
 
-## Primary: the agy wrapper (scripts/agy.py)
+## Mandatory proxy contract (all CLI channels)
 
-For any programmatic delegation, prefer the wrapper — it closes the
-workspace-identification gap measured on 2026-09-16 (see notes below):
+Never invoke `agy` or `gemini` directly on this machine. Use `scripts/agy.py`
+or `scripts/run.py`. This is the user's explicit network constraint, not a
+promise that a proxy prevents account restrictions.
 
-> **Proxy constraint (mainland network, mandatory — account-safety, not just
-> functionality):** agy and gemini-cli both reach Google services and FAIL
-> without a proxy. Repeatedly hitting Google from a real mainland IP also
-> risks account-level security review (豆哥 confirmed this constraint
-> 2026-10-01) — never run either CLI bare on this machine. Always prefix
-> delegation commands with `HTTPS_PROXY=http://127.0.0.1:7890
-> HTTP_PROXY=http://127.0.0.1:7890` (local relay port; check it is up first).
-> Measured 2026-09-28: without the proxy, agy hangs on "Waiting for
-> authentication ... timed out" — this looks like an expired OAuth token but is
-> NOT; try the proxy before re-authenticating. gemini-cli without the proxy
-> reports `fetch failed`; with it, auth works.
->
-> **Hard guard (2026-10-01):** `scripts/agy.py` now refuses to launch agy when
-> no proxy env var is set or the proxy port is unreachable (TCP probe, exit 2)
-> — the no-bare-connection rule is enforced in code, not just by convention.
-> `--allow-no-proxy` is the explicit escape hatch for genuinely offshore hosts.
-> The gemini-cli wrapper (`scripts/run.py`) has NO such guard: bare invocations
-> of `run.py`/`gemini` still rely on the caller prefixing the proxy vars.
+Both wrappers now use `scripts/proxy_guard.py`:
 
-```bash
-python3 <skill-dir>/scripts/agy.py \
-  --cwd <workspace> \
-  --task-file <task.md>          # or --task "<bounded text>"
-  --timeout 25m                  # default; heavy reviews need it
-  --output <result.md>           # optional, append stdout for cross-session records
+- Proxy selection: `--proxy` → `GEMINI_DELEGATE_PROXY` → HTTPS/HTTP/ALL proxy
+  environment variables → `http://127.0.0.1:7890`. HTTP mixed ports are supported;
+  SOCKS and malformed URLs are rejected. Credentials, if present, are never printed
+  by the guard. Conflicting environment variables are normalized in the child only.
+- Before any provider CLI launch, verify the proxy TCP port and an HTTPS CONNECT
+  request through it. Print measured `egress ip/colo/loc` to stderr. An unavailable
+  proxy, TLS failure or invalid trace blocks the launch with exit 2. No direct fallback.
+- Set upper/lowercase HTTP/HTTPS/ALL proxy variables to the same endpoint and clear
+  both `NO_PROXY` variants in the child. Parent/system settings are not rewritten.
+- The former `--allow-no-proxy` and `--skip-egress-check` escapes are removed.
+- Gemini normal calls, model probes, CLI health checks and remote Skill updates use
+  the same protection. Local auth/model/session metadata and normal `--dry-run`
+  remain offline. Doctor performs network preflight, but no model call.
+
+**Boundary:** the guard enforces the CLI proxy configuration and verifies its
+preflight tunnel; it is not a system firewall. A proxy client's rules can still
+select `DIRECT` or route Cloudflare and Google through different nodes. Verify
+Google traffic in the proxy's connection view when diagnosing routing. A measured
+Cloudflare US exit does not prove the account's associated region is US or that
+Google sees that same exit. Direct native `agy` calls are outside this Skill's guard.
+
+Read [references/proxy-safety.md](references/proxy-safety.md) for configuration,
+manual entry points, diagnostics and the verification boundary.
+
+## Primary: agy wrapper (`scripts/agy.py`)
+
+PowerShell on Windows (CMD can use the same single-line `python` commands):
+
+```powershell
+$skillDir = 'C:\Users\DouXiulu\.agents\skills\gemini-delegate'
+python "$skillDir\scripts\agy.py" --doctor
+python "$skillDir\scripts\agy.py" --interactive --cwd .
+python "$skillDir\scripts\agy.py" --cwd . --task-file .\task.md --timeout 25m --plan-mode
+python "$skillDir\scripts\agy.py" --models
 ```
 
-The wrapper resolves `--cwd` to an absolute path, runs agy there, and
-injects a workspace-anchor header into every task (bilingual, explicit
-"do not search for another project path") — the agent never has to
-guess where it works. It also adds a hard-kill timeout buffer and
-surfaces agy's partial-output warning.
+For manual CMD chat, invoke `scripts/agy-safe.cmd` by its full path. It launches
+the same guarded interactive wrapper. It does not replace the installed `agy.exe`
+or edit PATH, shell profiles, login state or proxy application settings.
 
-Wrapper flags: `--model`, `--effort low|medium|high`, `--plan-mode`
-(read-only planning), `--add-dir <path>` (repeatable extra dirs),
-`--continue-session` (`-c`), `--no-anchor` (only when the task truly
-needs no directory).
+For automation, always give the resolved workspace and a bounded task. The wrapper
+injects a bilingual workspace anchor and blocks recursive delegation in the task
+contract. Task/log/output paths are relative to `--cwd`; UTF-8 task files with a BOM
+are accepted. `--no-anchor` is for genuinely directory-free text tasks only.
 
-## Bare agy invocation (fallback, and the measured pitfalls)
+Useful options: `--model`, `--effort low|medium|high|xhigh|max`, `--plan-mode`,
+repeatable `--add-dir`, `--continue-session` (`-c`), `--log-file`, `--output`,
+`--proxy`, `--timeout`. Use `--models` for the live account catalogue; do not
+hard-code model names. Continue the latest session only when it is known to belong
+to the same task/workspace.
 
-```bash
-cd <workspace> && agy --dangerously-skip-permissions --print-timeout 15m --print="<bounded task text>"
-```
+The wrapper preserves CLI permissions by default. Headless operations needing
+interactive approval may be denied; use plan mode and explicitly authorized CLI
+permission rules. `--dangerously-skip-permissions` is an explicit opt-in, never an
+automatic response to denied tools. Plan mode is a CLI execution mode, not a
+separate OS isolation boundary.
 
-Verified invocation notes (measured 2026-09-07):
+Use attached `--print=...` arguments internally to avoid prompt/flag ambiguity.
+The installed CLI's help is authoritative: on the locally logged agy 1.2.17 the native print timeout
+defaults to `0s` (unlimited), so this wrapper keeps an explicit 25m default plus a
+120s hard-timeout buffer. Empty output, partial timeout, structured `AGY_ERROR`
+and eligibility rejection are failures even if the native exit code is zero.
+Never fabricate a result or silently retry a rejected account.
 
-- Attach the prompt with `--print="..."` (or place it last). A bare `--print "<next-flag>"`
-  swallows the next flag as the prompt and silently drops the real task.
-- Default `--print-timeout` is 5m — too short for multi-file reviews; raise it explicitly.
-- Headless mode cannot show permission prompts: tool calls that need approval are
-  auto-denied ("no output produced"). For read-only tasks,
-  `--dangerously-skip-permissions` is acceptable when the task text itself forbids edits;
-  otherwise configure `permissions.allow` rules in the CLI settings.
-- Useful flags: `--model`, `--effort low|medium|high`, `--continue`/`-c` to resume the
-  most recent conversation, `--mode plan|accept-edits`.
-- Query `agy models` for the live model list (it spans Gemini Flash/Pro tiers plus Claude
-  Sonnet/Opus and GPT-OSS variants) — never hard-code the catalog.
-- The IDE command `antigravity chat` is a GUI panel (no stdout round-trip) — never use it
-  for programmatic delegation.
-- Treat a non-zero exit or an empty result as failure; do not fabricate an answer. Retry
-  once only for a concrete safe fix (e.g. re-attaching the prompt correctly).
+## Eligibility errors: facts before diagnosis
 
-Additional pitfalls (measured 2026-09-16, the reason the wrapper exists):
+`Eligibility check failed ... not currently available in your location` means
+Antigravity refused service eligibility. **It alone proves neither an account ban
+nor an IP-only cause.** OAuth success proves login authentication succeeded; it
+does not prove service entitlement is valid and does not rule out service-level
+account restrictions. Logs cannot retrospectively prove whether an earlier call
+used a proxy unless that call captured network evidence.
 
-- **"Eligibility check failed ... not available in your location" ≠ proxy
-  problem (measured 2026-10-01).** If the error persists WITH a healthy proxy,
-  reproduce with `--log-file <path>`: log lines `Print mode: silent auth
-  succeeded` followed by `server_oauth.go ... Account ineligible` mean the
-  proxy chain and OAuth both worked — Google's backend
-  (`daily-cloudcode-pa.googleapis.com ... loadCodeAssist`) rejected the
-  account/exit-IP combo server-side. Measured: a Singapore datacenter exit
-  (172.236.x) is rejected even though Singapore IS on the official supported
-  list (antigravity.google/docs/faq); a US exit worked in late September.
-  Triage order: switch to a US/Japan node and retry → if still failing, check
-  the Google account's country setting and account type (official FAQ:
-  Workspace accounts can hit eligibility issues; a personal @gmail.com is
-  recommended).
+The previous “definitely not banned / all datacenter exits are rejected” diagnosis
+and prefix blacklist were unsupported inferences and have been removed. A rejection
+observed at one IP is not evidence that its entire /16 or every cloud IP is blocked.
 
-- **Proxy first, auth second (2026-09-28):** on the mainland network both agy
-  and gemini-cli must run behind `HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:7890`;
-  the wrapper inherits these env vars, so prefix the wrapper invocation too.
-  gemini-cli additionally needs a current CLI version: v0.58.0's default model
-  `gemini-2.5-flash` was retired for new users (404 suggests migrating); upgrade
-  via `npm i -g @google/gemini-cli@latest`.
-- **`cd <workspace>` does not make the agent treat the cwd as the target
-  repository.** On a heavy review task the agent spent most of a 15m
-  budget "locating the VoiceHub repository containing vendor-sayit.mjs"
-  (checking other drives, shell history, process args) and timed out with
-  zero findings. The fix is not a flag — agy has no `--cwd` — it is an
-  explicit workspace path in the task text itself. The wrapper automates
-  this; when invoking bare, put the absolute path on the first line of
-  the task and say "do not search for or create other project paths".
-  (Wrapper-verified: with the anchor, small tasks return in seconds and
-  heavy tasks go straight to work — confirmed in the agy task logs.)
-- **Heavy multi-step reviews are agy's weak spot even with a correct
-  anchor.** The same six-facet review that Codex's review mode finished
-  in ~15m was still mid-flight at 25m with agy (agent-loop overhead on
-  serial explore → run tests → report). Budget 40m+ for agy reviews that
-  execute test suites, or route heavy cross-reviews to the Codex skill
-  and keep agy for small/medium bounded tasks.
-- 15m is not enough for review tasks that also run test suites; use 25m+.
-- Long inline `--print` payloads are fragile across shells; prefer a task
-  file (`--task-file` in the wrapper, or "first read <abs-path>/task.md"
-  in a bare invocation).
+Triage:
+
+1. Run `agy.py --doctor` to verify proxy reachability and measured exit without
+   sending a model task. Inspect proxy rules for Google domains. Do not remove the
+   proxy, bypass TLS verification or send repeated requests as a diagnostic.
+2. Read existing local logs, or use `--log-file` for one bounded, tool-free probe
+   after a concrete correction. Keep credentials, account identifiers and task text
+   out of shared diagnostics. Stop on eligibility rejection; no automatic retry.
+3. Check the Google account's associated country on Google's Terms of Service page,
+   age verification, personal/managed account type and official availability.
+   A proxy does not grant unsupported service eligibility. Use Google's official
+   correction/support process if the account association is wrong.
+4. If agy remains ineligible, report that clearly. Use the guarded Gemini API-key/
+   Vertex fallback only when the task permits that provider and its quota is usable.
+   Do not alter eligibility responses or silently change accounts/authentication.
+
+Official evidence checked 2026-10-05:
+[Antigravity FAQ](https://antigravity.google/docs/faq) covers geography, associated
+country, account type and age;
+[official CLI repository](https://github.com/google-antigravity/antigravity-cli)
+documents the native CLI/authentication entry points. Regional policies can change;
+consult the current official page during diagnosis.
+
+Workspace anchor and timeout experience: `cd` alone was insufficient for some
+heavy reviews, so retain the explicit task anchor. Prefer the inline path below
+when review material fits in context; reviews requiring tools/tests need a larger
+bounded budget. Long tasks should use `--task-file` to avoid shell length/escaping
+problems. The IDE command `antigravity chat` opens a GUI panel and is not a stdout
+delegation channel.
 
 ## Text-inline review mode (measured 2026-09-17)
 
@@ -149,8 +154,7 @@ were reproduced locally:
 2. **Quota exhaustion (exit 429, `TerminalQuotaError`)**: free-tier daily quotas apply per
    model (observed: `gemini-3.5-flash` requests/day exhausted; switching to `--model pro`
    reported `limit: 0`, i.e. that key has no free-tier Pro access at all — switching models
-   is NOT a reliable workaround). agy runs on the Antigravity account quota and is immune
-   to this. When the wrapper reports 429, do not retry the same day — use agy or report
+   is NOT a reliable workaround). agy uses a separate Antigravity quota; it can have its own limits and eligibility failures. When the wrapper reports 429, do not retry the same day — use agy or report
    honestly.
 
 

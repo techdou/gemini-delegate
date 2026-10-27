@@ -17,6 +17,7 @@ import secrets
 from model_catalog import discover_known_models, make_run_defaults, probe_model, profile_defaults
 from auth_manager import choose_auth, classify_auth_failure, inspect_auth, prepare_auth_environment
 from session_state import SessionLease, delete_record, key_fingerprint, list_records, load_record, save_record, session_key_from_env
+from proxy_guard import ProxyError, prepare_proxy
 from update_manager import (
     check_update, compatibility_status, install_release, list_backups, load_skill_metadata,
     manifest_source, read_update_cache, rollback as rollback_skill, update_info,
@@ -54,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     task.add_argument("--task-file", help="Read task text from a UTF-8 file relative to --cwd; use '-' for stdin.")
     p.add_argument("--mode", choices=MODE_CONTRACTS, default="ask")
     p.add_argument("--cwd", default=".", help="Authorized workspace root. Default: current directory.")
+    p.add_argument("--proxy", help="Mandatory HTTP proxy; defaults to env or http://127.0.0.1:7890. No direct fallback.")
     p.add_argument("--input", action="append", default=[], help="Input file/directory path. Repeatable.")
     p.add_argument(
         "--extra-dir",
@@ -105,7 +107,7 @@ def resolve_cli(value: str) -> str | None:
     return shutil.which(value)
 
 
-def run_doctor(cli: str, cwd: Path) -> int:
+def run_doctor(cli: str, cwd: Path, proxy_env: dict[str, str] | None = None) -> int:
     meta = load_skill_metadata()
     resolved = resolve_cli(cli)
     data: dict[str, object] = {
@@ -118,14 +120,14 @@ def run_doctor(cli: str, cwd: Path) -> int:
         "auth": inspect_auth(cwd),
         "auth_plan_auto": choose_auth(cwd, "auto"),
         "note": "Credential contents are never printed. For third-party Agent delegation, API Key or Vertex AI is preferred; individual Google/Code Assist OAuth is no longer supported.",
-        "network_note": "Doctor is local-only for Skill updates; use --check-update for a remote manifest check.",
+        "network_note": "Doctor runs mandatory proxy/egress preflight and local CLI checks; no model call or Skill-update request. Use --check-update for a proxied manifest check.",
     }
     if not resolved:
         data["error"] = "Gemini CLI executable not found"
         print(json.dumps(data, ensure_ascii=False, indent=2))
         return 1
     try:
-        v = subprocess.run([resolved, "--version"], capture_output=True, text=True, timeout=15)
+        v = subprocess.run([resolved, "--version"], capture_output=True, text=True, timeout=15, env=proxy_env)
         version_text = (v.stdout or v.stderr).strip()
         data["version"] = version_text
         data["version_exit_code"] = v.returncode
@@ -133,7 +135,7 @@ def run_doctor(cli: str, cwd: Path) -> int:
     except (OSError, subprocess.SubprocessError) as exc:
         data["version_error"] = str(exc)
     try:
-        h = subprocess.run([resolved, "--help"], capture_output=True, text=True, timeout=15)
+        h = subprocess.run([resolved, "--help"], capture_output=True, text=True, timeout=15, env=proxy_env)
         help_text = (h.stdout or h.stderr)
         checks = {
             "headless_prompt": "--prompt" in help_text or "-p" in help_text,
@@ -332,9 +334,20 @@ def write_text_file(path: Path, text: str) -> None:
 
 def main() -> int:
     args = parse_args()
+    # Local metadata/dry-run operations need no network. All provider launches do.
+    proxy_env = None
+    offline = (args.dry_run or args.update_info or args.list_backups or args.list_sessions
+               or args.session_info or args.forget_session or args.list_models
+               or args.current_model or args.auth_status or args.rollback)
+    if args.doctor or args.check_update or args.self_update or args.probe_model or not offline:
+        try:
+            proxy_env, _ = prepare_proxy(args.proxy)
+        except ProxyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.doctor:
         doctor_cwd = Path(args.cwd).expanduser().resolve()
-        return run_doctor(args.cli, doctor_cwd)
+        return run_doctor(args.cli, doctor_cwd, proxy_env)
 
     if args.update_info:
         print(json.dumps(update_info("gemini"), ensure_ascii=False, indent=2))
@@ -348,7 +361,7 @@ def main() -> int:
             print("error: no update manifest configured; pass --manifest or set the provider/generic *_SKILL_MANIFEST_URL environment variable", file=sys.stderr)
             return 2
         try:
-            result = check_update("gemini", source, channel=args.update_channel, timeout=min(args.timeout, 30))
+            result = check_update("gemini", source, channel=args.update_channel, timeout=min(args.timeout, 30), proxy=proxy_env["HTTPS_PROXY"])
         except Exception as exc:
             print(f"error: update check failed: {exc}", file=sys.stderr)
             return 69
@@ -367,12 +380,12 @@ def main() -> int:
                 resolved_for_update = resolve_cli(args.cli)
                 if resolved_for_update:
                     try:
-                        vp = subprocess.run([resolved_for_update, "--version"], capture_output=True, text=True, timeout=15)
+                        vp = subprocess.run([resolved_for_update, "--version"], capture_output=True, text=True, timeout=15, env=proxy_env)
                         if vp.returncode == 0:
                             installed_cli_version = (vp.stdout or vp.stderr).strip()
                     except (OSError, subprocess.SubprocessError):
                         pass
-                result = install_release("gemini", source, channel=args.update_channel, version=args.update_version, timeout=min(args.timeout, 120), installed_cli_version=installed_cli_version)
+                result = install_release("gemini", source, channel=args.update_channel, version=args.update_version, timeout=min(args.timeout, 120), installed_cli_version=installed_cli_version, proxy=proxy_env["HTTPS_PROXY"])
             else:
                 result = rollback_skill("gemini", version=args.rollback_version)
         except Exception as exc:
@@ -442,7 +455,7 @@ def main() -> int:
             return 4
         auth_temp = None
         try:
-            auth_temp, probe_env = prepare_auth_environment(auth_plan)
+            auth_temp, probe_env = prepare_auth_environment(auth_plan, base_env=proxy_env)
             result = probe_model(cli, cwd, args.probe_model, timeout=min(args.timeout, 120), env=probe_env)
         except (OSError, subprocess.SubprocessError, PermissionError, ValueError) as exc:
             print(json.dumps({"model": args.probe_model, "available": False, "error": str(exc), "auth": auth_plan}, ensure_ascii=False, indent=2))
@@ -599,7 +612,7 @@ def main() -> int:
 
     auth_temp = None
     try:
-        auth_temp, child_env = prepare_auth_environment(auth_plan)
+        auth_temp, child_env = prepare_auth_environment(auth_plan, base_env=proxy_env)
     except (PermissionError, ValueError) as exc:
         print(f"error: Gemini auth preparation failed: {exc}", file=sys.stderr)
         if session_lease:

@@ -1,178 +1,177 @@
 #!/usr/bin/env python3
-"""Antigravity CLI (`agy`) print-mode delegation wrapper.
-
-Why this exists (measured 2026-09-16): `cd <workspace> && agy --print="…"`
-is not enough for heavy tasks — the agy agent does not treat the process
-cwd as the target repository and may spend most of its budget searching
-for the "real" workspace (other drives, shell history, process args),
-then time out. This wrapper closes that gap the same way the Codex
-wrapper does: an explicit --cwd, a --task-file channel, and a workspace
-anchor line injected at the top of every task so the agent never has to
-guess where it is working.
-
-Usage:
-  python3 agy.py --cwd <workspace> (--task "<text>" | --task-file <path>)
-                 [--timeout 25m] [--model <id>] [--effort low|medium|high]
-                 [--output <path>] [--plan-mode] [--add-dir <path>...]
-                 [--continue-session] [--no-anchor] [--allow-no-proxy]
-
-代理硬校验：启动前要求 HTTPS_PROXY/HTTP_PROXY 已设置且端口可达，否则拒绝运行
-（账号风控保护，见 enforce_proxy）。境外机器确无代理必要时用 --allow-no-proxy。
-
-Exit codes: agy's exit code is passed through; 2 for wrapper misuse.
-"""
-
+"""Antigravity CLI wrapper: mandatory proxy, workspace anchor and failure triage."""
 from __future__ import annotations
 
 import argparse
-import os
+import json
+from pathlib import Path
 import re
-import socket
+import shutil
 import subprocess
 import sys
-from pathlib import Path
-from urllib.parse import urlparse
 
-DEFAULT_TIMEOUT = "25m"  # 重任务经验值：5m 默认太短，15m 在带测试的审查上实测不够。
+from proxy_guard import ProxyError, prepare_proxy
 
-# 大陆网络裸连 Google 不只是"功能失败"（hang / fetch failed），还有账号风控风险——
-# 反复以真实大陆 IP 触达 Google 服务可能触发账号安全审查。因此 wrapper 在启动 agy
-# 前强制校验代理，宁可拒跑也不裸连（2026-10-01 豆哥确认此约束）。
-PROXY_ENV_KEYS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
-
-
-def extract_proxy_endpoint(raw: str) -> tuple[str, int] | None:
-    """从代理环境变量值解析 host:port；支持 http://、socks5:// 与裸 host:port 形式。"""
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-    candidate = raw if "://" in raw else f"http://{raw}"
-    parsed = urlparse(candidate)
-    if not parsed.hostname or not parsed.port:
-        return None
-    return parsed.hostname, parsed.port
-
-
-def enforce_proxy(allow_no_proxy: bool) -> None:
-    """启动 agy 前的代理硬校验：未设置代理环境变量或代理端口不可达一律拒绝。"""
-    if allow_no_proxy:
-        return
-    raw = next((os.environ[k] for k in PROXY_ENV_KEYS if os.environ.get(k, "").strip()), "")
-    endpoint = extract_proxy_endpoint(raw)
-    if endpoint is None:
-        print(
-            "agy.py: 拒绝启动——未检测到 HTTPS_PROXY/HTTP_PROXY 代理环境变量。\n"
-            "  大陆网络裸连 Google 有账号风控风险，必须经由代理：\n"
-            "  HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 python agy.py ...\n"
-            "  （仅在境外机器等确无代理必要的环境，可显式加 --allow-no-proxy）",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    host, port = endpoint
-    try:
-        with socket.create_connection((host, port), timeout=3):
-            pass
-    except OSError:
-        print(
-            f"agy.py: 拒绝启动——代理 {host}:{port} 不可达（3s 探活失败）。\n"
-            "  请先启动本地代理（如 Clash 7890 端口）再运行；跑代理前先探活可避免 agy 长时间挂起。\n"
-            "  （确无代理必要的环境可显式加 --allow-no-proxy）",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
+DEFAULT_TIMEOUT = "25m"
+ELIGIBILITY_MARKERS = (
+    "eligibility check failed", "not currently available in your location",
+    "not available in your location", "account is not eligible", "account ineligible",
+)
 ANCHOR_TEMPLATE = """[Workspace anchor / 工作区锚点]
 All work for this task happens in this directory (it IS the target repository/workspace — do not search for, locate, or create any other project path):
 {abs_path}
-本任务的所有工作都在该目录内完成（它就是目标仓库/工作区，不要搜索、定位或创建其他项目路径）。所有命令都在该目录下执行。
+本任务的所有工作都在该目录内完成，不要搜索、定位或创建其他项目路径。所有命令在该目录下执行。不得递归调用 Gemini/agy 委派技能。
 
 """
 
 
+def diagnose_eligibility(stdout_text: str, stderr_text: str) -> bool:
+    blob = f"{stdout_text}\n{stderr_text}".lower()
+    if not any(marker in blob for marker in ELIGIBILITY_MARKERS):
+        return False
+    print(
+        "agy.py: [资格检查被拒] 本轮调用失败，不自动重试。\n"
+        "  仅凭这条错误不能确认封号，也不能排除服务资格/账号限制。\n"
+        "  核对 Google 账号关联地区、年龄、账号类型与官方支持范围；本轮代理出口见上方。\n"
+        "  OAuth 成功仅证明登录认证通过，不证明 Antigravity 服务资格正常。\n"
+        "  Cloudflare 出口不代表 Google 域名一定走同一节点；请检查代理的分流规则。\n"
+        "  如保留 --log-file 日志，分享前须删除 token、邮箱及任务内容。",
+        file=sys.stderr,
+    )
+    return True
+
+
 def parse_duration_to_seconds(text: str) -> int:
-    """'25m' / '1500s' / '2h' → 秒。agy 接受 Go duration 字符串，这里只做校验与硬杀换算。"""
-    m = re.fullmatch(r"(\d+)(ms|s|m|h)", text.strip())
-    if not m:
-        raise SystemExit(f"agy.py: invalid --timeout '{text}' (expected e.g. 25m / 900s)")
-    scale = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
-    return max(1, int(float(m.group(1)) * scale[m.group(2)]))
+    match = re.fullmatch(r"(\d+)(ms|s|m|h)", text.strip())
+    if not match or int(match.group(1)) == 0:
+        raise ValueError("--timeout must be positive (e.g. 25m / 900s)")
+    scale = {"ms": .001, "s": 1, "m": 60, "h": 3600}
+    return max(1, int(int(match.group(1)) * scale[match.group(2)]))
 
 
 def build_task(args: argparse.Namespace, cwd: Path) -> str:
-    if bool(args.task) == bool(args.task_file):
-        raise SystemExit("agy.py: provide exactly one of --task or --task-file")
-    body = args.task or Path(args.task_file).read_text(encoding="utf-8")
-    if args.no_anchor:
-        return body
-    return ANCHOR_TEMPLATE.format(abs_path=cwd) + body
+    if args.task_file:
+        path = Path(args.task_file).expanduser()
+        body = (path if path.is_absolute() else cwd / path).read_text(encoding="utf-8-sig")
+    else:
+        body = args.task or ""
+    if not body.strip():
+        raise ValueError("task must not be empty")
+    return body if args.no_anchor else ANCHOR_TEMPLATE.format(abs_path=cwd) + body
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(add_help=True, description="agy print-mode delegation wrapper")
-    parser.add_argument("--cwd", required=True, help="目标工作区（绝对路径）；脚本将 cd 到这里并把路径注入任务锚点")
-    parser.add_argument("--task", help="任务文本（与 --task-file 二选一）")
-    parser.add_argument("--task-file", help="任务文件路径（长任务推荐，避免 shell 转义与长度问题）")
-    parser.add_argument("--timeout", default=DEFAULT_TIMEOUT, help="print 超时（Go duration 格式，默认 25m）")
-    parser.add_argument("--model", help="透传 agy --model")
-    parser.add_argument("--effort", choices=["low", "medium", "high"], help="透传 agy --effort")
-    parser.add_argument("--output", help="stdout 追加落盘到该文件（跨会话留存审查结果）")
-    parser.add_argument("--plan-mode", action="store_true", help="透传 --mode plan（只读规划模式）")
-    parser.add_argument("--add-dir", action="append", default=[], help="额外授权目录（可重复）")
-    parser.add_argument("--continue-session", action="store_true", help="透传 -c 续接最近会话")
-    parser.add_argument("--no-anchor", action="store_true", help="禁用工作区锚点注入（仅当你确知任务无需目录）")
-    parser.add_argument("--allow-no-proxy", action="store_true", help="跳过代理硬校验（仅限境外机器等确无代理必要的环境）")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cwd", default=".", help="目标工作区；默认当前目录")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--task")
+    mode.add_argument("--task-file")
+    mode.add_argument("--interactive", action="store_true", help="经保护的交互聊天，继承终端输入输出")
+    mode.add_argument("--doctor", action="store_true", help="检查代理/出口/CLI help，不调用模型或触发登录")
+    mode.add_argument("--models", action="store_true", help="经代理查询 agy models；可能检查服务资格")
+    parser.add_argument("--proxy", help="HTTP 代理；优先于环境变量，缺省使用 127.0.0.1:7890")
+    parser.add_argument("--timeout", default=DEFAULT_TIMEOUT)
+    parser.add_argument("--model")
+    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
+    parser.add_argument("--output", help="print stdout 追加到文件，相对 --cwd")
+    parser.add_argument("--log-file", help="CLI 日志路径，相对 --cwd；可能含敏感内容，仅本地保存")
+    parser.add_argument("--plan-mode", action="store_true", help="透传 --mode plan")
+    parser.add_argument("--dangerously-skip-permissions", action="store_true", help="显式启用 CLI 自动批准；默认遵守 CLI 权限")
+    parser.add_argument("--add-dir", action="append", default=[])
+    parser.add_argument("--continue-session", "-c", action="store_true")
+    parser.add_argument("--no-anchor", action="store_true")
     args = parser.parse_args()
-
-    enforce_proxy(args.allow_no_proxy)
-
-    cwd = Path(args.cwd).resolve()
-    if not cwd.is_dir():
-        raise SystemExit(f"agy.py: --cwd is not a directory: {cwd}")
-
-    task = build_task(args, cwd)
-    timeout_seconds = parse_duration_to_seconds(args.timeout)
-
-    cmd = ["agy", "--dangerously-skip-permissions", "--print-timeout", args.timeout, "--print", task]
-    if args.model:
-        cmd += ["--model", args.model]
-    if args.effort:
-        cmd += ["--effort", args.effort]
-    if args.plan_mode:
-        cmd += ["--mode", "plan"]
-    for extra in args.add_dir:
-        cmd += ["--add-dir", str(Path(extra).resolve())]
-    if args.continue_session:
-        cmd += ["-c"]
-
-    # 硬杀保护：agy 自身有 --print-timeout（返回 partial 并退出），这里再加 120s
-    # 缓冲兜底它彻底挂死的情况；两者取更晚的时刻。
+    print_mode = args.task is not None or args.task_file is not None
     try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds + 120,
-        )
-    except subprocess.TimeoutExpired as error:
-        print(f"agy.py: hard timeout after {timeout_seconds + 120}s (agy print-timeout did not fire)", file=sys.stderr)
-        out = error.stdout or ""
-        print(out)
-        return 124
+        cwd = Path(args.cwd).expanduser().resolve()
+        if not cwd.is_dir():
+            raise ValueError(f"--cwd is not a directory: {cwd}")
+        if not print_mode and (args.output or args.no_anchor):
+            raise ValueError("--output/--no-anchor require print mode")
+        task = build_task(args, cwd) if print_mode else None
+        timeout_seconds = parse_duration_to_seconds(args.timeout)
+        cli = shutil.which("agy")
+        if not cli:
+            print("agy.py: agy executable not found", file=sys.stderr)
+            return 127
+        child_env, egress = prepare_proxy(args.proxy)
+    except (ProxyError, ValueError, OSError) as error:
+        print(f"agy.py: {error}", file=sys.stderr)
+        return 2
 
-    sys.stdout.write(completed.stdout or "")
-    sys.stderr.write(completed.stderr or "")
+    if args.doctor:
+        try:
+            result = subprocess.run([cli, "--help"], cwd=str(cwd), env=child_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"agy.py: local help check failed ({type(error).__name__})", file=sys.stderr)
+            return 1
+        help_text = result.stdout + result.stderr
+        capabilities = {flag: flag in help_text for flag in ("--print", "--print-timeout", "--mode", "--log-file")}
+        ok = result.returncode == 0 and all(capabilities.values())
+        print(json.dumps({"ok": ok, "cli": cli, "egress": egress, "capabilities": capabilities, "eligibility": "not checked; no model call", "proxy_scope": "child env + explicit CONNECT preflight; proxy server rules still apply"}, ensure_ascii=False, indent=2))
+        return 0 if ok else 1
+
+    cmd = [cli]
+    if print_mode:
+        # 附着参数值，避免任务以 -- 开头时被解析为选项。
+        cmd += ["--print-timeout", args.timeout, "--print=" + task]
+    elif args.models:
+        cmd += ["models"]
+    if not args.models:
+        if args.model:
+            cmd += ["--model", args.model]
+        if args.effort:
+            cmd += ["--effort", args.effort]
+        if args.plan_mode:
+            cmd += ["--mode", "plan"]
+        if args.dangerously_skip_permissions:
+            cmd += ["--dangerously-skip-permissions"]
+        for extra in args.add_dir:
+            path = Path(extra).expanduser()
+            cmd += ["--add-dir", str((path if path.is_absolute() else cwd / path).resolve())]
+        if args.continue_session:
+            cmd += ["-c"]
+    if args.log_file:
+        path = Path(args.log_file).expanduser()
+        path = (path if path.is_absolute() else cwd / path).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cmd += ["--log-file", str(path)]
+    try:
+        if args.interactive:
+            return subprocess.run(cmd, cwd=str(cwd), env=child_env).returncode
+        completed = subprocess.run(cmd, cwd=str(cwd), env=child_env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_seconds + 120 if print_mode else 30)
+    except subprocess.TimeoutExpired as error:
+        print("agy.py: hard timeout; partial output is not a completed result", file=sys.stderr)
+        out = error.stdout or ""
+        sys.stdout.write(out.decode("utf-8", "replace") if isinstance(out, bytes) else out)
+        return 124
+    except OSError as error:
+        print(f"agy.py: failed to start CLI ({type(error).__name__})", file=sys.stderr)
+        return 126
+    except KeyboardInterrupt:
+        return 130
+
+    stdout, stderr = completed.stdout or "", completed.stderr or ""
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    code = completed.returncode
+    if diagnose_eligibility(stdout, stderr):
+        code = code or 4
+    elif "print timeout" in (stdout + stderr).lower():
+        print("agy.py: partial result; print timeout", file=sys.stderr)
+        code = code or 124
+    elif not stdout.strip():
+        print("agy.py: no result returned", file=sys.stderr)
+        code = code or 1
+    elif "agy_error:" in (stdout + stderr).lower():
+        code = code or 1
     if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("a", encoding="utf-8") as handle:
-            handle.write(completed.stdout or "")
-            handle.write(f"\n[agy-wrapper] exit={completed.returncode}\n")
-    if "print timeout" in (completed.stdout or ""):
-        print("agy.py: WARNING — agy hit its print timeout and returned partial output", file=sys.stderr)
-    return completed.returncode
+        path = Path(args.output).expanduser()
+        path = path if path.is_absolute() else cwd / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(stdout + f"\n[agy-wrapper] exit={code}\n")
+    return code
 
 
 if __name__ == "__main__":

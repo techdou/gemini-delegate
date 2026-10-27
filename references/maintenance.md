@@ -9,7 +9,7 @@ python3 scripts/run.py --doctor
 python3 scripts/run.py --update-info
 ```
 
-`--doctor` checks the installed CLI path/version/auth hints and reports the Skill's locally verified compatibility boundary. A CLI newer than `tested_through_cli` is a warning, not an automatic failure. Capability behavior matters more than version numbers.
+`--doctor` first verifies the mandatory proxy and egress (no model call), then checks the installed CLI path/version/auth hints and reports the Skill's locally verified compatibility boundary. A CLI newer than `tested_through_cli` is a warning, not an automatic failure. Capability behavior matters more than version numbers.
 
 Gemini CLI exposes `gemini --version`; its official distribution also supports `gemini update`, while npm installations can be updated with `npm install -g @google/gemini-cli@latest`. This Skill deliberately does not run either command automatically because CLI installation ownership is separate from Skill ownership.
 
@@ -68,3 +68,12 @@ python3 scripts/run.py --rollback --rollback-version 1.4.0 --allow-self-update
 ```
 
 A model alias/version change does not by itself justify a Skill update. Update the Skill when Headless protocol, structured events, thinking configuration, permissions, session behavior, or wrapper logic changes.
+
+## Proxy regression checks
+
+Run `python -m unittest discover -s tests -v` after changing network guards.
+The tests mock network/CLI operations and make no Google calls.
+Use `python scripts/agy.py --doctor` for actual proxy + CLI help verification.
+A passing doctor does not imply account eligibility or model availability.
+Remote manifest/archive downloads always use the selected HTTP proxy, including
+redirects; HTTP redirects, failed CONNECT/TLS and oversized responses are rejected.

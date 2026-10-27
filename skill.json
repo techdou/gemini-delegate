@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "gemini-delegate",
-  "version": "1.5.1",
+  "version": "1.5.3",
   "provider_cli": "gemini",
   "compatibility": {
     "min_cli": null,
@@ -34,5 +34,17 @@
     ],
     "individual_google_oauth": "unsupported/migrated to Antigravity; explicit organization-only escape hatch remains",
     "persistent_settings_mutation": false
+  },
+  "network": {
+    "proxy_required": true,
+    "default_proxy": "http://127.0.0.1:7890",
+    "direct_fallback": false,
+    "preflight": "TCP + explicit HTTP CONNECT/TLS + valid egress trace",
+    "scope": "wrapper child configuration; proxy server routing rules remain applicable"
+  },
+  "agy_compatibility": {
+    "help_verified_cli": "1.2.17",
+    "native_print_timeout_default": "0s",
+    "model_task_success": false
   }
 }

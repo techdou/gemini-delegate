@@ -24,7 +24,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from proxy_guard import fetch_https, select_proxy
 import zipfile
 
 SCHEMA_VERSION = 1
@@ -127,20 +127,12 @@ def _read_local(path: Path, max_bytes: int) -> bytes:
     return path.read_bytes()
 
 
-def read_source(source: str, *, max_bytes: int, timeout: int = 20) -> bytes:
+def read_source(source: str, *, max_bytes: int, timeout: int = 20, proxy: str | None = None) -> bytes:
     parsed = urlparse(source)
     if parsed.scheme in ("http", "https"):
         if parsed.scheme != "https":
             raise ValueError("remote update sources must use HTTPS")
-        req = Request(source, headers={"User-Agent": "foreign-cli-skills-updater/1.4"})
-        with urlopen(req, timeout=timeout) as resp:
-            length = resp.headers.get("Content-Length")
-            if length and int(length) > max_bytes:
-                raise ValueError("remote object exceeds size limit")
-            data = resp.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise ValueError("remote object exceeds size limit")
-        return data
+        return fetch_https(select_proxy(proxy), source, max_bytes=max_bytes, timeout=timeout)
     if parsed.scheme == "file":
         return _read_local(Path(parsed.path).expanduser().resolve(), max_bytes)
     if parsed.scheme:
@@ -148,8 +140,8 @@ def read_source(source: str, *, max_bytes: int, timeout: int = 20) -> bytes:
     return _read_local(Path(source).expanduser().resolve(), max_bytes)
 
 
-def load_release_manifest(source: str, provider: str, *, timeout: int = 20) -> dict[str, Any]:
-    raw = read_source(source, max_bytes=1024 * 1024, timeout=timeout)
+def load_release_manifest(source: str, provider: str, *, timeout: int = 20, proxy: str | None = None) -> dict[str, Any]:
+    raw = read_source(source, max_bytes=1024 * 1024, timeout=timeout, proxy=proxy)
     obj = json.loads(raw.decode("utf-8"))
     if not isinstance(obj, dict) or obj.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported release manifest schema")
@@ -201,9 +193,9 @@ def read_update_cache(provider: str) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-def check_update(provider: str, source: str, *, channel: str = "stable", timeout: int = 20) -> dict[str, Any]:
+def check_update(provider: str, source: str, *, channel: str = "stable", timeout: int = 20, proxy: str | None = None) -> dict[str, Any]:
     metadata = load_skill_metadata()
-    manifest = load_release_manifest(source, provider, timeout=timeout)
+    manifest = load_release_manifest(source, provider, timeout=timeout, proxy=proxy)
     latest, release = select_release(manifest, channel=channel)
     current = str(metadata["version"])
     cmp = compare_versions(latest, current)
@@ -233,8 +225,8 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def download_artifact(source: str, target: Path, *, timeout: int = 60) -> None:
-    data = read_source(source, max_bytes=MAX_ARCHIVE_BYTES, timeout=timeout)
+def download_artifact(source: str, target: Path, *, timeout: int = 60, proxy: str | None = None) -> None:
+    data = read_source(source, max_bytes=MAX_ARCHIVE_BYTES, timeout=timeout, proxy=proxy)
     target.write_bytes(data)
 
 
@@ -376,10 +368,11 @@ def install_release(
     version: str | None = None,
     timeout: int = 60,
     installed_cli_version: str | None = None,
+    proxy: str | None = None,
 ) -> dict[str, Any]:
     current_root = skill_root()
     current_meta = load_skill_metadata(current_root)
-    manifest = load_release_manifest(source, provider, timeout=min(timeout, 30))
+    manifest = load_release_manifest(source, provider, timeout=min(timeout, 30), proxy=proxy)
     selected, release = select_release(manifest, channel=channel, version=version)
     current_version = str(current_meta["version"])
     if compare_versions(selected, current_version) <= 0 and version is None:
@@ -387,7 +380,7 @@ def install_release(
     with tempfile.TemporaryDirectory(prefix=f".{provider}-download-", dir=str(current_root.parent)) as td:
         td_path = Path(td)
         archive = td_path / "candidate.zip"
-        download_artifact(str(release["artifact_url"]), archive, timeout=timeout)
+        download_artifact(str(release["artifact_url"]), archive, timeout=timeout, proxy=proxy)
         actual = sha256_file(archive)
         expected = str(release["sha256"]).lower()
         if actual.lower() != expected:
